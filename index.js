@@ -1,9 +1,9 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const mysql = require('mysql');
+const { Pool } = require('pg');
 const multer = require('multer');
 const path = require('path');
-const bcrypt = require('bcrypt'); // Import bcrypt
+const bcrypt = require('bcrypt');
 const fs = require('fs');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -11,13 +11,13 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 const port = 8000;
-const jwtSecret = 'your_jwt_secret_key'; // Clé secrète pour JWT
+const jwtSecret = 'your_jwt_secret_key';
 
 // Configuration de body-parser pour traiter les données du formulaire
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors({
-  origin: 'http://localhost:3000' // Remplacez par l'origine de votre frontend
+  origin: '*' // Remplacez par l'origine de votre frontend
 }));
 
 // Vérifiez et créez le répertoire de destination si nécessaire
@@ -37,20 +37,21 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage: storage });
-// Configuration de la connexion MySQL
-const db = mysql.createConnection({
+
+// Configuration de la connexion PostgreSQL
+const pool = new Pool({
+  user: 'hegnon_unpaid',
   host: 'localhost',
-  user: 'adhm',
-  password: 'Adhm229@',
-  database: 'unpaidfinance',
-  socketPath: "/opt/lampp/var/mysql/mysql.sock"
+  database: 'base_Hegnon_unpaid',
+  password: 'Hegnon@200704',
+  port: 5432,
 });
 
-db.connect((err) => {
+pool.connect((err) => {
   if (err) {
     throw err;
   }
-  console.log('MySQL Connected...');
+  console.log('PostgreSQL Connected...');
 });
 
 // Ajouter un administrateur manuellement
@@ -59,21 +60,21 @@ const createAdmin = async () => {
   const password = 'Hegnon@200704';
   const role = 'admin';
 
-  // Vérifiez si l'administrateur existe déjà
-  const query = 'SELECT * FROM demandes WHERE email = ?';
-  db.query(query, [email], async (err, results) => {
+  const query = 'SELECT * FROM demandes WHERE email = $1';
+  const values = [email];
+
+  pool.query(query, values, async (err, result) => {
     if (err) {
       console.error('Erreur lors de la vérification de l\'administrateur:', err);
       return;
     }
 
-    if (results.length === 0) {
-      // Si l'administrateur n'existe pas, créez-le
+    if (result.rows.length === 0) {
       const hashedPassword = await bcrypt.hash(password, 10);
-      const insertQuery = 'INSERT INTO demandes (email, mdp, role) VALUES (?, ?, ?)';
-      const values = [email, hashedPassword, role];
+      const insertQuery = 'INSERT INTO demandes (email, mdp, role) VALUES ($1, $2, $3)';
+      const insertValues = [email, hashedPassword, role];
 
-      db.query(insertQuery, values, (err, result) => {
+      pool.query(insertQuery, insertValues, (err, result) => {
         if (err) {
           console.error('Erreur lors de la création de l\'administrateur:', err);
           return;
@@ -125,10 +126,10 @@ app.post('/api/demandes', upload.fields([{ name: 'idcard' }, { name: 'homeproof'
 
   try {
     const hashedPassword = await bcrypt.hash(mdp, 10);
-    const query = 'INSERT INTO demandes (nom, prenom, email, telephone, montantDemande, projetDescription, pays, ville, devise, mdp, role, idcard, homeproof) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+    const query = 'INSERT INTO demandes (nom, prenom, email, telephone, montantDemande, projetDescription, pays, ville, devise, mdp, role, idcard, homeproof) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)';
     const values = [nom, prenom, email, telephone, montantDemande, projetDescription, pays, ville, devise, hashedPassword, role || 'client', idcard, homeproof];
 
-    db.query(query, values, (err, result) => {
+    pool.query(query, values, (err, result) => {
       if (err) {
         console.error('Erreur lors de l\'enregistrement de la demande:', err);
         return res.status(500).send('Erreur du serveur');
@@ -145,18 +146,20 @@ app.post('/api/demandes', upload.fields([{ name: 'idcard' }, { name: 'homeproof'
 app.post('/api/login', (req, res) => {
   const { email, mdp } = req.body;
 
-  const query = 'SELECT * FROM demandes WHERE email = ?';
-  db.query(query, [email], (err, results) => {
+  const query = 'SELECT * FROM demandes WHERE email = $1';
+  const values = [email];
+
+  pool.query(query, values, (err, result) => {
     if (err) {
       console.error('Erreur lors de la récupération de l\'utilisateur:', err);
       return res.status(500).send('Erreur du serveur');
     }
 
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(400).send('Email ou mot de passe incorrect');
     }
 
-    const user = results[0];
+    const user = result.rows[0];
 
     bcrypt.compare(mdp, user.mdp, (err, isMatch) => {
       if (err) {
@@ -168,7 +171,6 @@ app.post('/api/login', (req, res) => {
         return res.status(400).send('Email ou mot de passe incorrect');
       }
 
-      // Générer un token JWT
       const token = jwt.sign({ id: user.id, role: user.role }, jwtSecret, { expiresIn: '1h' });
 
       res.status(200).send({ message: 'Connexion réussie', role: user.role, token });
@@ -176,16 +178,17 @@ app.post('/api/login', (req, res) => {
   });
 });
 
+// Route pour récupérer toutes les demandes (admin seulement)
 app.get('/api/demandes/all', verifyToken, checkRole('admin'), (req, res) => {
   const query = 'SELECT * FROM demandes';
   
-  db.query(query, (err, results) => {
+  pool.query(query, (err, result) => {
     if (err) {
       console.error('Erreur lors de la récupération des demandes:', err);
       return res.status(500).send('Erreur du serveur');
     }
     
-    res.status(200).send(results);
+    res.status(200).send(result.rows);
   });
 });
 
@@ -193,24 +196,25 @@ app.get('/api/demandes/all', verifyToken, checkRole('admin'), (req, res) => {
 app.get('/api/user/me', verifyToken, (req, res) => {
   const userId = req.user.id;
 
-  const query = 'SELECT * FROM demandes WHERE id = ?';
+  const query = 'SELECT * FROM demandes WHERE id = $1';
+  const values = [userId];
   
-  db.query(query, [userId], (err, results) => {
+  pool.query(query, values, (err, result) => {
     if (err) {
       console.error('Erreur lors de la récupération des informations de l\'utilisateur:', err);
       return res.status(500).send('Erreur du serveur');
     }
 
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).send('Utilisateur non trouvé');
     }
 
-    const user = results[0];
+    const user = result.rows[0];
     res.status(200).send(user);
   });
 });
 
-
 app.listen(port, () => {
   console.log(`Server started on port ${port}`);
 });
+
